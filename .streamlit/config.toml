@@ -1,0 +1,4 @@
+[client]
+# Keep CSV export in the application-owned Approve/Reject workflow.
+# This hides built-in table downloads; it is not a data-access security boundary.
+disableDataExport = true
