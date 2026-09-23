@@ -72,3 +72,16 @@ def test_export_groups_suppliers_even_when_calculation_order_is_mixed(draft):
     assert [(row["Поставщик"], row["Код 1С"]) for row in rows] == sorted(
         (row["Поставщик"], row["Код 1С"]) for row in rows
     )
+
+
+def test_export_records_effective_category_period():
+    data = demo_dataset()
+    data.items[0].category = "LONG"
+    result = calculate_orders(data, Policy(as_of=date(2026, 9, 22), horizon_days=30, lead_days=7,
+                                            category_horizons={"LONG": 60}))
+    quantities = {r.key: r.quantity for r in result.rows}
+    rows = list(csv.DictReader(io.StringIO(export_csv(
+        result, quantities, fingerprint(result, quantities)).decode("utf-8-sig")), delimiter=";"))
+    assert rows[0]["Период между закупками"] == "60"
+    assert rows[0]["Срок поставки"] == "7"
+    assert all(row["Период между закупками"] == "30" for row in rows[1:])

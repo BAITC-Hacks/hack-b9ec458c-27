@@ -31,4 +31,4 @@ def demo_dataset() -> Dataset:
             item.shipments = [Shipment(quantity=10, arrival=date(2026, 9, 24), source=ref)]
             item.sources["stock"] = ref
             items.append(item)
-    return Dataset(items=items, synthetic=True, issues=["SYNTHETIC/TRAINING: все данные этого режима вымышленные."])
+    return Dataset(items=items, synthetic=True)

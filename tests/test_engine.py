@@ -5,7 +5,7 @@ import pytest
 from pydantic import ValidationError
 
 from replenishment.demo import demo_dataset
-from replenishment.engine import calculate_item, calculate_orders, round_order
+from replenishment.engine import calculate_item, calculate_orders, isolated_excess, round_order
 from replenishment.models import Policy, Shipment, StockInput
 
 
@@ -156,6 +156,114 @@ def test_split_customer_purchase_grouped(policy):
     spike.quantity = 1670
     item.sales.extend([spike.model_copy(update={"document": "split-2"}), spike.model_copy(update={"document": "split-3"})])
     assert calculate_item(item, policy).quantity == calculate_item(base, policy).quantity
+
+
+def _add_training_spike(item, day, customer_id, excess=5000):
+    sale = next(s for s in item.sales if s.date == day)
+    sale.customer_id = customer_id
+    sale.quantity += excess
+    next(m for m in item.months if m.month == day.replace(day=1)).quantity += excess
+
+
+@pytest.mark.parametrize("dates", [
+    (date(2026, 6, 12), date(2026, 8, 12)),
+    (date(2026, 8, 7), date(2026, 8, 22)),
+])
+def test_multiple_distinct_customer_spikes_preserve_baseline(item, policy, dates):
+    original = calculate_item(item, policy)
+    for index, day in enumerate(dates):
+        _add_training_spike(item, day, f"SYNTHETIC-ONE-OFF-{index}")
+    result = calculate_item(item, policy)
+    assert result.components["excluded_quantity"] == 10000
+    assert result.components["forecast"] == pytest.approx(original.components["forecast"])
+    assert result.quantity == original.quantity
+    assert sum(month["excluded"] for month in result.history) == 10000
+
+
+def test_same_customer_different_invoices_not_treated_as_one_off(item, policy):
+    for day in (date(2026, 6, 12), date(2026, 8, 12)):
+        _add_training_spike(item, day, "SYNTHETIC-REPEAT")
+    excess, _, warnings = isolated_excess(item, policy)
+    assert not excess
+    assert any("повторный крупный клиент" in warning for warning in warnings)
+
+
+@pytest.mark.parametrize("customer_id", [None, "", "   "])
+def test_missing_customer_multiple_invoices_cannot_prove_isolation(item, policy, customer_id):
+    for sale in item.sales:
+        sale.customer_id = customer_id
+    for day in (date(2026, 6, 12), date(2026, 8, 12)):
+        _add_training_spike(item, day, customer_id)
+    excess, _, warnings = isolated_excess(item, policy)
+    assert not excess
+    assert any("разные накладные" in warning for warning in warnings)
+
+
+def test_missing_customer_split_invoices_aggregate_by_sku_day(policy):
+    base, item = demo_dataset().items[:2]
+    for sale in item.sales:
+        sale.customer_id = None
+    spike = next(s for s in item.sales if s.date == date(2026, 8, 12))
+    spike.quantity /= 2
+    item.sales.append(spike.model_copy(update={"document": "SYNTHETIC-OTHER-INVOICE"}))
+    result = calculate_item(item, policy)
+    assert result.components["excluded_quantity"] == 5000
+    assert result.quantity == calculate_item(base, policy).quantity
+    assert any("накладная не является ID клиента" in warning for warning in result.warnings)
+
+
+def test_known_customer_with_unidentified_large_event_remains_ambiguous(item, policy):
+    _add_training_spike(item, date(2026, 6, 12), "SYNTHETIC-ONE-OFF")
+    _add_training_spike(item, date(2026, 8, 12), None)
+    assert isolated_excess(item, policy)[0] == {}
+
+
+def test_high_regime_across_distinct_customers_is_preserved(item, policy):
+    for day in (7, 12, 17, 22):
+        _add_training_spike(item, date(2026, 8, day), f"SYNTHETIC-CUSTOMER-{day}")
+    assert isolated_excess(item, policy)[0] == {}
+
+
+def test_repeat_customer_preserved_while_independent_one_off_is_removed(item, policy):
+    for day in (date(2026, 6, 12), date(2026, 7, 12)):
+        _add_training_spike(item, day, "SYNTHETIC-REPEATING")
+    _add_training_spike(item, date(2026, 8, 12), "SYNTHETIC-ONE-OFF")
+    assert isolated_excess(item, policy)[0] == {date(2026, 8, 1): 5000}
+
+
+def test_multiple_spikes_reconcile_each_month_separately(item, policy):
+    june, august = date(2026, 6, 12), date(2026, 8, 12)
+    _add_training_spike(item, june, "SYNTHETIC-JUNE")
+    _add_training_spike(item, august, "SYNTHETIC-AUGUST")
+    item.months[-1].quantity += 1
+    excess, _, warnings = isolated_excess(item, policy)
+    assert excess == {june.replace(day=1): 5000}
+    assert any("2026-08-01" in warning and "не сверяются" in warning for warning in warnings)
+
+
+@pytest.mark.parametrize("refund, expected", [(-20, 5000), (-80, 0)])
+def test_signed_returns_reconciled_before_spike_removal(policy, refund, expected):
+    item = demo_dataset().items[1]
+    sale = next(s for s in item.sales if s.date == date(2026, 8, 12))
+    item.sales.append(sale.model_copy(update={"quantity": refund, "document": "SYNTHETIC-REFUND"}))
+    item.months[-1].quantity += refund
+    excess, _, warnings = isolated_excess(item, policy)
+    assert sum(excess.values()) == expected
+    if not expected:
+        assert any("возвраты/корректировки" in warning for warning in warnings)
+
+
+def test_insufficient_normal_baseline_preserves_peak(policy):
+    item = demo_dataset().items[1]
+    item.sales = [sale for sale in item.sales if sale.date >= date(2026, 8, 1)]
+    excess, _, warnings = isolated_excess(item, policy)
+    assert not excess
+    assert any("Недостаточно обычных операций" in warning for warning in warnings)
+
+
+def test_unresolved_high_event_at_history_boundary_is_preserved(item, policy):
+    _add_training_spike(item, date(2026, 8, 27), "SYNTHETIC-LAST-EVENT")
+    assert isolated_excess(item, policy)[0] == {}
 
 
 def test_negative_sales_are_not_abs_values(item, policy):

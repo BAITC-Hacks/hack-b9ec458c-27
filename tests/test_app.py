@@ -12,6 +12,30 @@ def button(app, label):
     return next(b for b in app.button if b.label == label)
 
 
+def test_manager_item_labels_preserve_correction_identity(monkeypatch):
+    from replenishment.demo import demo_dataset
+    dataset = demo_dataset()
+    dataset.items[0].name = "Автомат тестовый"
+    dataset.items[1].name = "Автомат тестовый"
+    dataset.items[2].name = ""
+    monkeypatch.setattr("replenishment.demo.demo_dataset", lambda: dataset)
+    app = AppTest.from_file(str(APP), default_timeout=30).run()
+    selector = next(s for s in app.selectbox if s.label == "Товар для уточнения")
+    assert len(set(selector.options)) == len(dataset.items)
+    assert selector.options == sorted(selector.options, key=str.casefold)
+    assert any(label.startswith("Без названия — ") for label in selector.options)
+    item = dataset.items[0]
+    label = next(label for label in selector.options
+                 if label.startswith(item.name + " — " + item.supplier) and label.endswith("код " + item.sku))
+    assert item.article in label
+    selector.select_index(selector.options.index(label)).run()
+    next(n for n in app.number_input if n.label == "Свободный остаток на выбранную дату").set_value(123.0).run()
+    button(app, "Применить уточнения").click().run()
+    assert not app.exception
+    assert set(app.session_state["stocks"]) == {item.key}
+    assert app.session_state["stocks"][item.key].quantity == 123.0
+
+
 def test_demo_calculation_and_approve_reject():
     app = AppTest.from_file(str(APP), default_timeout=30).run()
     assert not app.exception
@@ -29,6 +53,32 @@ def test_demo_calculation_and_approve_reject():
     assert app.session_state["approval"] == token
     button(app, "Отклонить / снять утверждение").click().run()
     assert app.session_state["approval"] is None
+
+
+@pytest.mark.parametrize("all_sufficient", [False, True])
+def test_order_table_excludes_sufficient_stock(monkeypatch, all_sufficient):
+    from replenishment.demo import demo_dataset
+    dataset = demo_dataset()
+    for item in (dataset.items if all_sufficient else dataset.items[:1]):
+        item.stock = 1_000_000
+    monkeypatch.setattr("replenishment.demo.demo_dataset", lambda: dataset)
+    app = AppTest.from_file(str(APP), default_timeout=30).run()
+    button(app, "Рассчитать рекомендации").click().run()
+    assert not app.exception
+    calculation = app.session_state["calculation"]
+    expected = {r.key for r in calculation.rows if r.status == "ok" and r.quantity > 0}
+    frames = [frame.value for frame in app.dataframe if "К заказу" in frame.value.columns]
+    shown = {key for frame in frames for key in frame["key"]}
+    assert shown == expected
+    assert all((frame["Рекомендовано"] > 0).all() for frame in frames)
+    # Hidden zero-order rows remain available for inspecting the calculation.
+    detail = next(s for s in app.selectbox if s.label == "Показать расчёт позиции")
+    assert len(detail.options) == len(dataset.items)
+    assert not app.get("download_button")
+    if all_sufficient:
+        assert not frames
+        assert button(app, "Утвердить текущий заказ").disabled
+        assert any("Пополнение не требуется" in info.value for info in app.info)
 
 
 def test_readme_demo_scenario_twice():
@@ -127,6 +177,104 @@ def test_mode_change_clears_old_draft():
     assert not app.exception
     assert "approval" not in app.session_state
     assert "calculation" not in app.session_state
+
+
+def test_category_horizon_changes_order_and_invalidates_approval():
+    app = AppTest.from_file(str(APP), default_timeout=30).run()
+    button(app, "Рассчитать рекомендации").click().run()
+    before = app.session_state["calculation"].rows[0].quantity
+    button(app, "Утвердить текущий заказ").click().run()
+    next(m for m in app.multiselect if m.label == "Категории с отдельным периодом").set_value(["DEMO"]).run()
+    next(n for n in app.number_input if n.label == "Период закупки для категории DEMO, дней").set_value(60).run()
+    assert "approval" not in app.session_state
+    assert "calculation" not in app.session_state
+    assert not app.get("download_button")
+    button(app, "Рассчитать рекомендации").click().run()
+    assert not app.exception
+    assert app.session_state["calculation"].policy.category_horizons == {"DEMO": 60}
+    assert app.session_state["calculation"].rows[0].quantity > before
+
+
+def test_training_stockout_scenario_clears_old_approval_and_does_not_leak(monkeypatch, tmp_path):
+    from replenishment.demo import demo_dataset
+    from replenishment.scenarios import SCENARIOS
+    app = AppTest.from_file(str(APP), default_timeout=30).run()
+    button(app, "Рассчитать рекомендации").click().run()
+    button(app, "Утвердить текущий заказ").click().run()
+    app.selectbox(key="training_scenario").set_value(SCENARIOS[3]).run()
+    assert "calculation" not in app.session_state
+    assert "approval" not in app.session_state
+    button(app, "Рассчитать рекомендации").click().run()
+    result = app.session_state["calculation"]
+    assert result.synthetic
+    assert result.policy.stockout_days
+    assert result.rows[1].quantity > result.rows[0].quantity
+    assert any("СЦЕНАРНОЕ" in c.value for c in app.caption)
+    partner = demo_dataset()
+    partner.synthetic = False
+    monkeypatch.setattr("replenishment.importer.load_dataset", lambda paths: partner)
+    app.radio[0].set_value("Файлы партнёра").run()
+    app.text_area[0].set_value(str(tmp_path)).run()
+    button(app, "Загрузить источники").click().run()
+    next(n for n in app.number_input if n.label == "Период между закупками, дней").set_value(30).run()
+    next(n for n in app.number_input if n.label == "Срок новой поставки, дней").set_value(7).run()
+    button(app, "Рассчитать рекомендации").click().run()
+    assert not app.exception
+    assert not app.session_state["calculation"].synthetic
+    assert not app.session_state["calculation"].policy.stockout_days
+    assert not app.session_state["calculation"].policy.category_horizons
+
+
+def test_partner_historical_stock_is_displayed_not_promoted(monkeypatch, tmp_path):
+    from replenishment.demo import demo_dataset
+    partner = demo_dataset()
+    partner.synthetic = False
+    item = partner.items[0]
+    item.stock = None
+    monkeypatch.setattr("replenishment.importer.load_dataset", lambda paths: partner)
+    app = AppTest.from_file(str(APP), default_timeout=30).run()
+    app.radio[0].set_value("Файлы партнёра").run()
+    app.text_area[0].set_value(str(tmp_path)).run()
+    button(app, "Загрузить источники").click().run()
+    next(s for s in app.selectbox if s.label == "Товар для уточнения").set_value(item.key).run()
+    assert any("Исторический остаток на начало 01.08.2026: 100" in i.value for i in app.info)
+    assert app.session_state["stocks"] == {}
+    next(n for n in app.number_input if n.label == "Период между закупками, дней").set_value(30).run()
+    next(n for n in app.number_input if n.label == "Срок новой поставки, дней").set_value(7).run()
+    button(app, "Рассчитать рекомендации").click().run()
+    assert not app.exception
+    result = next(r for r in app.session_state["calculation"].rows if r.key == item.key)
+    assert result.status == "needs_data" and result.quantity is None
+
+
+def test_backtest_runs_only_on_request_and_never_creates_order(monkeypatch):
+    from replenishment.backtest import backtest_dataset
+    check = Mock(wraps=backtest_dataset)
+    monkeypatch.setattr("replenishment.backtest.backtest_dataset", check)
+    app = AppTest.from_file(str(APP), default_timeout=30).run()
+    assert not check.called
+    app.button(key="backtest_run").click().run()
+    assert not app.exception
+    assert check.call_count == 1
+    assert app.session_state["backtest_report"]["coverage"]["evaluated_periods"] == 3
+    assert "calculation" not in app.session_state
+    assert "approval" not in app.session_state
+    assert not app.get("download_button")
+    app.run()
+    assert check.call_count == 1
+    app.selectbox(key="backtest_item").select_index(1).run()
+    assert "backtest_report" not in app.session_state
+    assert check.call_count == 1
+
+
+def test_backtest_failure_is_safe(monkeypatch):
+    monkeypatch.setattr("replenishment.backtest.backtest_dataset", Mock(side_effect=RuntimeError("SECRET_PATH")))
+    app = AppTest.from_file(str(APP), default_timeout=30).run()
+    app.button(key="backtest_run").click().run()
+    assert not app.exception
+    assert "backtest_report" not in app.session_state
+    assert "SECRET_PATH" not in str(app)
+    assert any("Проверка прогноза не завершена" in e.value for e in app.error)
 
 
 class FakeAgentModel:

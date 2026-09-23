@@ -54,5 +54,6 @@ def export_csv(calculation: Calculation, quantities: dict[str, float], approval:
                          row.quantity, quantities[row.key], row.urgency, safe_text(row.explanation),
                          safe_text(" | ".join(row.warnings)), safe_text(reason),
                          safe_text(" | ".join(f"{s.file}/{s.sheet}!{s.cell}" for s in row.evidence)),
-                         calculation.policy.horizon_days, calculation.policy.lead_days, current])
+                         calculation.policy.category_horizons.get(row.category, calculation.policy.horizon_days),
+                         calculation.policy.lead_days, current])
     return output.getvalue().encode("utf-8-sig")

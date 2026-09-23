@@ -26,11 +26,18 @@ def round_order(quantity: float, minimum: float | None, multiple: float | None) 
 
 
 def isolated_excess(item: Item, policy: Policy):
-    """Only isolated events; repeated high volumes remain in demand history.
+    """Conservative demo heuristic, not proof that a sale is non-recurring.
 
-    Group by anonymized customer/day if supplied, otherwise document/day.
-    Compare with median and MAD, and retain the median normal portion of an event.
-    Do not alter a monthly series when transaction coverage does not reconcile.
+    Group by anonymized customer/day, or SKU/day when a customer is unknown;
+    an invoice never identifies a customer. Median/MAD define high events.
+    A baseline needs six normal events and at least three per high event.
+    Remove excess only on days bracketed by normal observed sale days, and
+    only for customers with one high event in this window. Adjacent high days
+    and repeat high customers are retained. With unknown customers, more than
+    one high event is ambiguous and retained, even across different invoices.
+    Keep the normal median portion, and reconcile signed monthly transactions
+    before subtracting anything. Sparse recurring demand can still be ambiguous;
+    removals are auditable suggestions and require manager review.
     """
     start = shifted_month(policy.as_of.replace(day=1), -policy.lookback_months)
     end = policy.as_of.replace(day=1)
@@ -42,7 +49,8 @@ def isolated_excess(item: Item, policy: Policy):
         totals[month] += sale.quantity
         if sale.quantity <= 0:
             continue
-        identity = ("customer", sale.customer_id) if sale.customer_id else ("document", sale.document)
+        customer = sale.customer_id.strip() if sale.customer_id else None
+        identity = ("customer", customer) if customer else ("unknown", None)
         key = sale.date, identity
         events[key] += sale.quantity
         refs[key].append(sale.source)
@@ -52,17 +60,47 @@ def isolated_excess(item: Item, policy: Policy):
     mad = median(abs(q - center) for q in events.values())
     threshold = max(policy.outlier_multiplier * center, center + policy.mad_multiplier * mad)
     candidates = [key for key, qty in events.items() if qty > threshold]
-    if len(candidates) != 1:
-        return {}, [], (["Несколько крупных событий: сохранены, требуется проверка регулярности."] if candidates else [])
-    key = candidates[0]
-    month = key[0].replace(day=1)
-    monthly = next((m.quantity for m in item.months if m.month == month), None)
-    if monthly is None or not math.isclose(monthly, totals[month], rel_tol=1e-6, abs_tol=1e-6):
-        return {}, [], ["Всплеск найден, но накладные не сверяются с месячным итогом: автоматическое исключение заблокировано."]
-    excess = events[key] - center
-    if monthly < excess:
-        return {}, [], ["Возвраты/корректировки не позволяют однозначно исключить всплеск."]
-    return {month: excess}, refs[key], [f"Исключена разовая часть операции {key[0]}: {excess:g}; обычная часть {center:g} сохранена."]
+    if not candidates:
+        return {}, [], []
+    normal_count = len(events) - len(candidates)
+    if normal_count < max(6, 3 * len(candidates)):
+        return {}, [], ["Недостаточно обычных операций для отделения всплесков от нового уровня спроса; крупные события сохранены."]
+    if len(candidates) > 1 and any(key[1][0] == "unknown" for key in candidates):
+        return {}, [], ["Несколько крупных событий при неполных ID клиентов: сохранены; разные накладные не доказывают разовых клиентов."]
+
+    counts = defaultdict(int)
+    for key in candidates:
+        counts[key[1]] += 1
+    days = sorted({key[0] for key in events})
+    day_indices = {day: index for index, day in enumerate(days)}
+    high_days = {key[0] for key in candidates}
+    eligible = defaultdict(list)
+    warnings = []
+    for key in candidates:
+        index = day_indices[key[0]]
+        isolated = (0 < index < len(days) - 1
+                    and days[index - 1] not in high_days and days[index + 1] not in high_days)
+        if counts[key[1]] != 1 or not isolated:
+            warnings.append(f"Крупная операция {key[0]} сохранена: повторный крупный клиент либо нет обычных дней с обеих сторон; требуется проверка регулярности.")
+            continue
+        eligible[key[0].replace(day=1)].append(key)
+
+    removed, evidence = {}, []
+    monthly_quantities = {month.month: month.quantity for month in item.months}
+    for month, keys in eligible.items():
+        monthly = monthly_quantities.get(month)
+        if monthly is None or not math.isclose(monthly, totals[month], rel_tol=1e-6, abs_tol=1e-6):
+            warnings.append(f"{month}: всплеск найден, но накладные не сверяются с месячным итогом: автоматическое исключение заблокировано.")
+            continue
+        excess = sum(events[key] - center for key in keys)
+        if monthly < excess:
+            warnings.append(f"{month}: возвраты/корректировки не позволяют однозначно исключить всплески.")
+            continue
+        removed[month] = excess
+        for key in keys:
+            evidence.extend(refs[key])
+            warnings.append(f"Исключена разовая часть операции {key[0]} по эвристике: {events[key] - center:g}; обычная часть {center:g} сохранена. Требуется проверка менеджера.")
+    return removed, evidence, warnings
 
 
 def calculate_item(item: Item, policy: Policy) -> Recommendation:
@@ -108,8 +146,8 @@ def calculate_item(item: Item, policy: Policy) -> Recommendation:
     if len(available) < len(months):
         row.warnings.append("Пустые месяцы не заменены нулями; оценка использует только известные месяцы.")
     row.warnings.append("Текущий незавершённый месяц исключён из обучения.")
-    if not any(s.customer_id for s in item.sales):
-        row.warnings.append("Нет обезличенного ID клиента: анализ возможен по накладным, не по клиенту.")
+    if not any(s.customer_id and s.customer_id.strip() for s in item.sales):
+        row.warnings.append("Нет обезличенного ID клиента: анализ только по товару/дню; накладная не является ID клиента.")
     if item.category is None:
         row.warnings.append("Категория отсутствует: категорийные правила не применялись.")
     if item.minimum is None and item.multiple is None:

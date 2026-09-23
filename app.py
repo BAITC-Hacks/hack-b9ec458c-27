@@ -13,10 +13,12 @@ from pydantic import ValidationError
 from replenishment.demo import demo_dataset
 from replenishment.agent import AgentResult, run_agent
 from replenishment.agent_client import model_from_env
+from replenishment.backtest import backtest_dataset
 from replenishment.engine import calculate_orders
 from replenishment.importer import load_dataset
-from replenishment.models import Policy, StockInput
+from replenishment.models import Dataset, Policy, StockInput
 from replenishment.review import export_csv, fingerprint
+from replenishment.scenarios import SCENARIOS, training_scenario
 
 log = logging.getLogger("replenishment.ui")
 st.set_page_config(page_title="Пополнение склада", layout="wide")
@@ -159,9 +161,20 @@ if st.session_state.get("mode") != mode:
 
 overview = st.empty()
 overview.info("Результатов пока нет. Выберите данные и нажмите «Рассчитать рекомендации».")
+scenario_stockouts = {}
 if mode == "Учебный пример":
     st.warning("SYNTHETIC/TRAINING — вымышленные данные. Этот режим проверяет поведение, а не фактическую потребность компании.")
-    dataset = demo_dataset()
+    scenario = st.selectbox("Учебный сценарий", SCENARIOS, key="training_scenario")
+    if st.session_state.get("active_scenario") != scenario:
+        st.session_state.active_scenario = scenario
+        st.session_state.stocks, st.session_state.stockouts, st.session_state.growth = {}, {}, {}
+        reset_calculation()
+    if scenario == SCENARIOS[0]:
+        dataset = demo_dataset()
+        st.caption("Сравните REGULAR и SPIKE: разовая часть 5000 показана отдельно от регулярного спроса.")
+    else:
+        dataset, scenario_stockouts, scenario_description = training_scenario(scenario)
+        st.caption(scenario_description)
 else:
     default_paths = [Path.home() / "OneDrive" / "Desktop" / name for name in ("Хакатон, файлы", "Хакатон файлы 2")]
     paths_text = st.text_area("Папки с Excel, по одной на строку", value="\n".join(str(p) for p in default_paths if p.exists()))
@@ -213,10 +226,42 @@ horizon = a.number_input("Период между закупками, дней",
 lead = b.number_input("Срок новой поставки, дней", min_value=0, max_value=366, value=7 if dataset.synthetic else None)
 suppliers = c.multiselect("Поставщики", sorted({i.supplier for i in dataset.items}), default=[])
 categories = st.multiselect("Категории (исходные коды)", sorted({i.category or "Без категории" for i in dataset.items}), default=[])
+category_horizons = {}
+with st.expander("Период закупки по категориям"):
+    st.caption("Необязательное явное правило менеджера: для выбранных категорий заменяет общий период. "
+               "Смысл исходных кодов категорий не предполагается. Срок поставки остаётся общим.")
+    category_options = sorted({i.category for i in dataset.items if i.category is not None})
+    custom_categories = st.multiselect("Категории с отдельным периодом", category_options,
+                                      key="category_rules_" + dataset_version[:16])
+    for category in custom_categories:
+        value = st.number_input(f"Период закупки для категории {category}, дней", min_value=1, max_value=366,
+                                value=int(horizon or 30),
+                                key="category_days_" + dataset_version[:16] + "_" + category)
+        category_horizons[category] = value
 
 with st.expander("Подтверждённые уточнения менеджера"):
     st.caption("Вводите только подтверждённые значения. Они заменяют соответствующий вход и сохраняются в текущей сессии.")
-    selected = st.selectbox("Товар для уточнения", [i.key for i in dataset.items], index=None)
+    item_labels = {
+        i.key: f"{i.name.strip() or 'Без названия'} — {i.supplier} · "
+               f"{('арт. ' + i.article + ' · ') if i.article else ''}код {i.sku}"
+        for i in dataset.items
+    }
+    selected = st.selectbox(
+        "Товар для уточнения", sorted(item_labels, key=lambda key: item_labels[key].casefold()),
+        index=None, format_func=item_labels.__getitem__,
+        placeholder="Выберите товар или введите название",
+    )
+    if selected is not None and not dataset.synthetic:
+        selected_item = next(i for i in dataset.items if i.key == selected)
+        historical = [m for m in selected_item.months if m.month <= as_of and m.opening_stock is not None]
+        if historical:
+            latest = max(historical, key=lambda m: m.month)
+            st.info(f"Исторический остаток на начало {latest.month:%d.%m.%Y}: {latest.opening_stock:g} "
+                    f"{selected_item.unit or '(единица не указана)'}. "
+                    "Это не подтверждённый текущий свободный остаток; автоматически в заказ не подставляется.")
+            if latest.stock_source:
+                source = latest.stock_source
+                st.caption(f"Источник: {source.file} / {source.sheet}!{source.cell}")
     new_stock = st.number_input("Свободный остаток на выбранную дату", min_value=0.0, value=None)
     month = st.date_input("Месяц подтверждённого stockout", value=as_of.replace(day=1))
     absent = st.number_input("Подтверждённые дни stockout", min_value=0, max_value=31, value=None)
@@ -233,9 +278,16 @@ with st.expander("Подтверждённые уточнения менедже
         st.session_state.stocks, st.session_state.stockouts, st.session_state.growth = {}, {}, {}
         reset_calculation()
     st.write("Уточнённых остатков:", len(st.session_state.stocks), "Товаров со stockout:", len(st.session_state.stockouts))
+    if scenario_stockouts:
+        st.caption(f"Отдельно применяются учебные периоды stockout: "
+                   f"{sum(len(months) for months in scenario_stockouts.values())}. "
+                   "Они сценарные, не подтверждённые данные партнёра.")
 
 with st.expander("Метод и параметры обнаружения выбросов"):
-    st.caption("Правило: одиночное событие выше обоих порогов — медиана × множитель и медиана + множитель MAD. Повторяющиеся крупные события сохраняются. Это открытая эвристика, не норматив поставщика.")
+    st.caption("Кандидат выше обоих порогов: медиана × множитель и медиана + множитель MAD. "
+               "Несколько изолированных событий разных клиентов могут быть исключены. Повторные крупные клиенты "
+               "и неоднозначные события без ID сохраняются. Нужны обычные продажи с обеих сторон всплеска "
+               "и сверка месячных итогов. Это проверяемая эвристика, не норматив поставщика.")
     multiplier = st.number_input("Множитель медианы", min_value=2.0, max_value=20.0, value=4.0)
     mad = st.number_input("Множитель MAD", min_value=2.0, max_value=20.0, value=6.0)
     lookback = st.number_input("История для анализа, месяцев", min_value=3, max_value=36, value=12)
@@ -243,12 +295,17 @@ with st.expander("Метод и параметры обнаружения выб
 policy = None
 try:
     if horizon is not None and lead is not None:
+        stockout_days = {key: dict(months) for key, months in scenario_stockouts.items()}
+        for key, months in st.session_state.stockouts.items():
+            stockout_days.setdefault(key, {}).update(months)
         policy = Policy(as_of=as_of, horizon_days=horizon, lead_days=lead, suppliers=suppliers, categories=categories,
                         outlier_multiplier=multiplier, mad_multiplier=mad, lookback_months=lookback,
-                        stocks=st.session_state.stocks, stockout_days=st.session_state.stockouts,
-                        growth_overrides=st.session_state.growth)
+                        stocks=st.session_state.stocks, stockout_days=stockout_days,
+                        growth_overrides=st.session_state.growth, category_horizons=category_horizons)
 except ValidationError:
     st.error("Проверьте параметры: число дней stockout должно соответствовать выбранному месяцу.")
+if horizon is None or lead is None:
+    st.info("Для расчёта введите период между закупками и срок новой поставки. Поставщики и категории — необязательные фильтры.")
 previous = st.session_state.get("calculation")
 if previous and (policy is None or previous.policy != policy):
     reset_calculation()
@@ -261,6 +318,63 @@ if st.button("Рассчитать рекомендации", type="primary", di
         log.error("Calculation failure: %s", type(exc).__name__)
         reset_calculation()
         st.error("Расчёт не завершён. Проверьте входные данные; результат не сохранён.")
+
+with st.expander("Проверка прогноза на прошлых месяцах"):
+    st.caption("Отдельная проверка прогноза продаж, не исторического заказа и не экономии. "
+               "Берём 3 завершённых месяца; при каждом прогнозе доступны только предшествующие продажи. "
+               "Текущие коэффициенты из файлов не используются: сезонность оценивается по 24 прошлым месяцам, "
+               "иначе явно принимается 1. Сравнение — с дневным темпом последнего месяца. "
+               "Даты исправлений исходных файлов неизвестны; это не архив данных на каждую прошлую дату.")
+    check_key = st.selectbox("Товар для проверки прогноза", list(item_labels),
+                             format_func=item_labels.__getitem__, key="backtest_item")
+    check_identity = (dataset_version, check_key, as_of.isoformat())
+    if st.session_state.get("backtest_identity") != check_identity:
+        st.session_state.pop("backtest_report", None)
+        st.session_state.backtest_identity = check_identity
+    if st.button("Проверить прогноз", key="backtest_run"):
+        item = next(i for i in dataset.items if i.key == check_key)
+        try:
+            st.session_state.backtest_report = backtest_dataset(
+                Dataset(items=[item], synthetic=dataset.synthetic), months=3, as_of=as_of)
+        except Exception as exc:
+            st.session_state.pop("backtest_report", None)
+            log.error("Backtest failure: %s", type(exc).__name__)
+            st.error("Проверка прогноза не завершена. Проверьте историю продаж.")
+    if report := st.session_state.get("backtest_report"):
+        evaluated = report["items"][0]
+        scores = evaluated["metrics"]
+        st.caption("Учебные продажи" if report["metadata"]["synthetic"] else "Продажи из файлов партнёра")
+        if evaluated["evaluated_periods"]:
+            st.write(f"Проверено месяцев: {evaluated['evaluated_periods']}. "
+                     f"Средняя абсолютная ошибка (MAE): {scores['mae']:.2f} {evaluated['unit']}; "
+                     f"простое сравнение: {scores['baseline_mae']:.2f} {evaluated['unit']}.")
+            if scores["wape"] is not None:
+                st.write(f"WAPE: {scores['wape']:.1%}; простое сравнение: {scores['baseline_wape']:.1%}.")
+            else:
+                st.info("WAPE не определена: сумма фактических продаж равна нулю.")
+        else:
+            st.warning("Недостаточно корректной истории для проверки прогноза.")
+        reasons = {
+            "invalid_item": "Ошибка данных товара", "missing_unit": "Неизвестна единица",
+            "invalid_or_duplicate_month": "Некорректный или повторный месяц",
+            "missing_target_sales": "Нет продаж проверяемого месяца",
+            "invalid_target_sales": "Некорректные продажи проверяемого месяца",
+            "missing_recent_training_month": "Нет трёх предыдущих месяцев",
+            "invalid_training_sales": "Некорректная история продаж",
+            "invalid_training_transaction": "Некорректная операция",
+            "forecast_unavailable": "Прогноз недоступен", "nonfinite_forecast": "Некорректный прогноз",
+        }
+        periods = [{"Месяц": p["month"], "Продажи": p.get("actual_sales"),
+                    "Прогноз": p.get("forecast"), "Простое сравнение": p.get("baseline_forecast"),
+                    "Абсолютная ошибка": p.get("absolute_error"),
+                    "Результат": "Проверен" if p["status"] == "ok" else reasons.get(p.get("reason"), "Недостаточно данных")}
+                   for p in evaluated["periods"]]
+        st.dataframe(pd.DataFrame(periods), hide_index=True,
+                     column_config={name: st.column_config.NumberColumn(format="%.2f") for name in
+                                    ("Продажи", "Прогноз", "Простое сравнение", "Абсолютная ошибка")})
+        st.caption("Цель сравнения — наблюдаемые продажи, включая разовые покупки. "
+                   "Упущенный спрос при stockout неизвестен. Большая ошибка не скрывается; "
+                   "эти числа не доказывают точность регулярной закупки или снижение затрат.")
 
 calculation = st.session_state.get("calculation")
 if calculation is None:
@@ -318,19 +432,21 @@ if not ok:
 st.subheader("Проект заказа по поставщикам")
 st.caption("Откройте поставщика, проверьте состав и количество. Ноль исключает позицию; любое изменение требует причины.")
 version = hashlib.sha256(calculation.model_dump_json().encode()).hexdigest()[:16]
-order_suppliers = sorted({r.supplier for r in ok})
-supplier_tabs = st.tabs(order_suppliers)
+order_suppliers = sorted({r.supplier for r in to_order})
+supplier_tabs = st.tabs(order_suppliers) if order_suppliers else []
+if not to_order:
+    st.info("Пополнение не требуется: запаса достаточно по всем рассчитанным позициям.")
 edited_by_supplier = {}
 for supplier, supplier_tab in zip(order_suppliers, supplier_tabs):
-    supplier_rows = [r for r in ok if r.supplier == supplier]
+    supplier_rows = [r for r in to_order if r.supplier == supplier]
     frame = pd.DataFrame([{"key": r.key, "Артикул": r.article, "Товар": r.name,
                            "Единица": r.unit, "Рекомендовано": r.quantity, "К заказу": r.quantity,
                            "Срочность": r.urgency} for r in supplier_rows])
     with supplier_tab:
-        st.caption(f"Позиций к заказу: {sum(r.quantity > 0 for r in supplier_rows)} · Всего рассчитано: {len(supplier_rows)}")
+        st.caption(f"Позиций к заказу: {len(supplier_rows)} · Всего рассчитано: {sum(r.supplier == supplier for r in ok)}")
         edited_by_supplier[supplier] = st.data_editor(
             frame, hide_index=True, disabled=[c for c in frame.columns if c != "К заказу"],
-            key="draft_" + version + "_" + hashlib.sha256(supplier.encode()).hexdigest()[:8],
+            key="draft_positive_" + version + "_" + hashlib.sha256(supplier.encode()).hexdigest()[:8],
             column_config={"key": None, "К заказу": st.column_config.NumberColumn(min_value=0.0)},
         )
 reason = st.text_input("Причина корректировки (если меняли количество)", key="reason_" + version)
