@@ -1,0 +1,4 @@
+interface:
+  display_name: "Logistics Hackathon MVP"
+  short_description: "Turn a logistics case into a demo-ready MVP"
+  default_prompt: "Use $logistics-hackathon-mvp to analyze this logistics hackathon case and stop before implementation until I say GO."
