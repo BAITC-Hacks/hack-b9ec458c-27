@@ -150,8 +150,13 @@ def test_agent_submit_only_and_structured_result(agent_factory, request_order, m
     assert not app.get("download_button")
     assert not export.called
     assert next(m.value for m in app.metric if m.label == "Проверенное количество по расчёту") == "85 шт"
-    assert any("AI-пояснение" in c.value for c in app.caption)
+    assert any("Текст модели может ошибаться" in c.value for c in app.caption)
     assert any("999999" in t.value for t in app.text)
+    assert any(e.label == "AI-пояснение модели (непроверенный текст)" for e in app.expander)
+    if request_order:
+        assert any("AI-проект не утверждён" in w.value for w in app.warning)
+    else:
+        assert any("Подготовка AI-проекта заказа не запрошена" in i.value for i in app.info)
     app.run()
     # Viewing another local explanation is a rerun, not a new agent request.
     next(s for s in app.selectbox if s.label == "Показать расчёт позиции").select_index(1).run()
@@ -169,6 +174,8 @@ def test_agent_approve_reject_separate_scope(agent_factory, monkeypatch):
     app = agent_app()
     app.button(key="agent_submit").click().run()
     assert not export.called
+    assert any("AI-проект не утверждён" in w.value for w in app.warning)
+    assert not app.get("download_button")
     app.button(key="agent_approve").click().run()
     pending = app.session_state["agent_result"].pending_order
     assert app.session_state["agent_approval"] == fingerprint(pending.calculation, pending.quantities)
@@ -176,11 +183,14 @@ def test_agent_approve_reject_separate_scope(agent_factory, monkeypatch):
     assert len(export.call_args.args[0].rows) == 1
     assert set(export.call_args.args[1]) == {app.selectbox(key="agent_item").value}
     assert pending.calculation.synthetic
+    assert any("AI-проект одной позиции утверждён" in s.value for s in app.success)
+    assert not any("AI-проект не утверждён" in w.value for w in app.warning)
     assert any(d.label == "Скачать утверждённый AI-проект CSV" for d in app.get("download_button"))
     calls = export.call_count
     app.button(key="agent_reject").click().run()
     assert "agent_approval" not in app.session_state
     assert not app.get("download_button")
+    assert any("AI-проект не утверждён" in w.value for w in app.warning)
     assert export.call_count == calls
     assert agent_factory.call_count == 1
     button(app, "Утвердить текущий заказ").click().run()

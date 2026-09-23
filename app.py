@@ -101,37 +101,45 @@ def show_agent(dataset, calculation, dataset_version):
     if not successful:
         st.session_state.pop("agent_approval", None)
         return
-    if result.narrative:
-        st.caption("AI-пояснение — текст модели; количество и разрешение на заказ определяются проверенным расчётом и вашим утверждением.")
-        st.text(result.narrative)
     pending = result.pending_order
-    if not request_order or result.status != "pending_approval" or pending is None:
+    if not request_order:
         st.session_state.pop("agent_approval", None)
-        return
-    st.markdown("**Отдельный AI-проект: одна выбранная позиция**")
-    try:
-        if (len(pending.calculation.rows) != 1 or pending.calculation.rows[0].key != item_key
-                or set(pending.quantities) != {item_key} or pending.quantities[item_key] <= 0):
-            raise ValueError("Unexpected scope")
-        token = fingerprint(pending.calculation, pending.quantities)
-        if st.session_state.get("agent_approval") != token:
-            st.session_state.pop("agent_approval", None)
-        st.write(f"{rows[item_key].supplier} · {rows[item_key].sku}: "
-                 f"{pending.quantities[item_key]:g} {pending.calculation.rows[0].unit or ''}")
-        approve, reject = st.columns(2)
-        if approve.button("Approve — утвердить AI-проект", key="agent_approve"):
-            st.session_state.agent_approval = token
-        if reject.button("Reject — снять утверждение AI-проекта", key="agent_reject"):
-            st.session_state.pop("agent_approval", None)
-        if st.session_state.get("agent_approval") == token:
-            st.success("AI-проект одной позиции утверждён. Заказ поставщику не отправлялся.")
-            st.download_button("Скачать утверждённый AI-проект CSV",
-                               export_csv(pending.calculation, pending.quantities, st.session_state.agent_approval),
-                               file_name="synthetic_agent_order.csv" if result.synthetic else "agent_order.csv",
-                               mime="text/csv", key="agent_download")
-    except (ValueError, TypeError):
+        st.info("Подготовка AI-проекта заказа не запрошена. Утверждать и скачивать нечего.")
+    elif result.status != "pending_approval" or pending is None:
         st.session_state.pop("agent_approval", None)
-        st.error("AI-проект некорректен. Выполните запрос заново; утверждение и экспорт недоступны.")
+        st.warning("AI-проект заказа не подготовлен. Утверждение и CSV недоступны.")
+    else:
+        st.markdown("**Отдельный AI-проект: одна выбранная позиция**")
+        try:
+            if (len(pending.calculation.rows) != 1 or pending.calculation.rows[0].key != item_key
+                    or set(pending.quantities) != {item_key} or pending.quantities[item_key] <= 0):
+                raise ValueError("Unexpected scope")
+            token = fingerprint(pending.calculation, pending.quantities)
+            if st.session_state.get("agent_approval") != token:
+                st.session_state.pop("agent_approval", None)
+            st.write(f"{rows[item_key].supplier} · {rows[item_key].sku}: "
+                     f"{pending.quantities[item_key]:g} {pending.calculation.rows[0].unit or ''}")
+            approve, reject = st.columns(2)
+            if approve.button("Approve — утвердить AI-проект", key="agent_approve"):
+                st.session_state.agent_approval = token
+            if reject.button("Reject — снять утверждение AI-проекта", key="agent_reject"):
+                st.session_state.pop("agent_approval", None)
+            if st.session_state.get("agent_approval") == token:
+                st.success("AI-проект одной позиции утверждён. Заказ поставщику не отправлялся.")
+                st.download_button("Скачать утверждённый AI-проект CSV",
+                                   export_csv(pending.calculation, pending.quantities, st.session_state.agent_approval),
+                                   file_name="synthetic_agent_order.csv" if result.synthetic else "agent_order.csv",
+                                   mime="text/csv", key="agent_download")
+            else:
+                st.warning("AI-проект не утверждён. CSV станет доступен только после Approve.")
+        except (ValueError, TypeError):
+            st.session_state.pop("agent_approval", None)
+            st.error("AI-проект некорректен. Выполните запрос заново; утверждение и экспорт недоступны.")
+            return
+    if result.narrative:
+        with st.expander("AI-пояснение модели (непроверенный текст)"):
+            st.caption("Текст модели может ошибаться. Статус утверждения, количество и доступность CSV указаны выше по проверенному расчёту и вашему действию.")
+            st.text(result.narrative)
 
 
 @st.cache_data(show_spinner=False, max_entries=2)
