@@ -64,7 +64,7 @@ def test_partner_rows_missing_data_show_blocking_reasons(tmp_path):
     button(app, "Рассчитать рекомендации").click().run()
 
     assert not app.exception
-    assert any("Заблокировано: нужны данные" in metric.label for metric in app.metric)
+    assert next(metric.value for metric in app.metric if metric.label == "Заблокировано всего") == "1"
     assert any("Заблокированные позиции" in expander.label for expander in app.expander)
     assert any("Нужны данные" in element.value and "актуальный свободный остаток" in element.value
                for element in app.markdown)
@@ -79,6 +79,44 @@ def test_parameter_change_invalidates_approval():
     next(n for n in app.number_input if n.label == "Период между закупками, дней").set_value(60).run()
     assert "calculation" not in app.session_state
     assert "approval" not in app.session_state
+
+
+def test_overview_counts_all_blocked_rows_and_clears_stale_results(monkeypatch):
+    from replenishment.demo import demo_dataset
+    dataset = demo_dataset()
+    dataset.items[0].stock = None
+    dataset.items[1].invalid = True
+    monkeypatch.setattr("replenishment.demo.demo_dataset", lambda: dataset)
+    app = AppTest.from_file(str(APP), default_timeout=30).run()
+    assert not app.metric
+    button(app, "Рассчитать рекомендации").click().run()
+    assert not app.exception
+    values = {metric.label: metric.value for metric in app.metric}
+    assert values["Рассчитано позиций"] == "2"
+    assert values["Заблокировано всего"] == "2"
+    assert values["Позиций к закупке"] == "2"
+    assert any("нужны данные — 1, ошибки данных — 1" in caption.value for caption in app.caption)
+    next(n for n in app.number_input if n.label == "Период между закупками, дней").set_value(60).run()
+    assert not app.metric
+    assert any("Результатов пока нет" in info.value for info in app.info)
+
+
+def test_general_order_quantity_change_requires_reason_and_new_approval():
+    app = AppTest.from_file(str(APP), default_timeout=30).run()
+    button(app, "Рассчитать рекомендации").click().run()
+    button(app, "Утвердить текущий заказ").click().run()
+    assert app.session_state["approval"]
+    editor_key = next(key for key in app.session_state if key.startswith("draft_"))
+    app.session_state[editor_key] = {"edited_rows": {0: {"К заказу": 90.0}},
+                                     "added_rows": [], "deleted_rows": []}
+    app.run()
+    assert not app.exception
+    assert app.session_state["approval"] is None
+    assert not app.get("download_button")
+    assert button(app, "Утвердить текущий заказ").disabled
+    next(t for t in app.text_input if t.label.startswith("Причина корректировки")).set_value("Учебная проверка корректировки").run()
+    button(app, "Утвердить текущий заказ").click().run()
+    assert app.session_state["approval"]
 
 
 def test_mode_change_clears_old_draft():
