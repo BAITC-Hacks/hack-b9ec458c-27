@@ -62,3 +62,13 @@ def test_export_escapes_formula_injection(draft):
     token = fingerprint(c, q)
     rows = list(csv.DictReader(io.StringIO(export_csv(c, q, token).decode("utf-8-sig")), delimiter=";"))
     assert rows[0]["Наименование"].startswith("'=")
+
+
+def test_export_groups_suppliers_even_when_calculation_order_is_mixed(draft):
+    calculation, quantities = draft
+    calculation.rows = [calculation.rows[i] for i in (2, 0, 3, 1)]
+    token = fingerprint(calculation, quantities)
+    rows = list(csv.DictReader(io.StringIO(export_csv(calculation, quantities, token).decode("utf-8-sig")), delimiter=";"))
+    assert [(row["Поставщик"], row["Код 1С"]) for row in rows] == sorted(
+        (row["Поставщик"], row["Код 1С"]) for row in rows
+    )

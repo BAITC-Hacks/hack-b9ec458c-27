@@ -37,6 +37,18 @@ def test_source_stock_and_inbound_change_result(item, policy):
     assert calculate_item(item, policy).quantity < more_stock.quantity
 
 
+def test_regular_sales_change_forecast_and_order(item, policy):
+    original = calculate_item(item, policy)
+    for month in item.months:
+        month.quantity *= 1.2
+    for sale in item.sales:
+        sale.quantity *= 1.2
+    increased = calculate_item(item, policy)
+    assert original.status == increased.status == "ok"
+    assert increased.components["forecast"] > original.components["forecast"]
+    assert increased.quantity > original.quantity
+
+
 def test_late_shipment_is_not_deducted(item, policy):
     before = calculate_item(item, policy)
     item.shipments[0].arrival = date(2026, 12, 1)

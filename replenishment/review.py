@@ -46,7 +46,7 @@ def export_csv(calculation: Calculation, quantities: dict[str, float], approval:
     writer.writerow(["Режим", "Дата расчёта", "Поставщик", "Код 1С", "Артикул", "Наименование", "Единица",
                      "Рекомендация", "Утверждено", "Срочность", "Обоснование", "Предупреждения", "Причина корректировки",
                      "Источники", "Период между закупками", "Срок поставки", "Версия"])
-    for row in calculation.rows:
+    for row in sorted(calculation.rows, key=lambda row: (row.supplier, row.sku)):
         if row.status != "ok" or quantities[row.key] <= 0:
             continue
         writer.writerow(["SYNTHETIC" if calculation.synthetic else "PARTNER DATA", str(calculation.policy.as_of),

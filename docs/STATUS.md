@@ -9,8 +9,9 @@ Approve/Reject и CSV. AI-помощник опционален и в текущ
 Agent Skill в `.agents/skills/` помогает разработке, но не является агентом
 приложения. Ниже в этом файле сохранены исторические снимки: их фразы о
 необъединённой агентной ветке и «следующем» слиянии больше не актуальны.
-На текущем `main` повторно выполнены `python -m pytest -v` — **122 passed
-in 56.64s** — и `python -m pip check` — **No broken requirements found**.
+После двух дополнительных проверок в ветке `final-data-validation` выполнены
+`python -m pytest -v` — **124 passed in 35.32s** — и `python -m pip check` —
+**No broken requirements found**. `compileall` завершился с кодом 0.
 
 Повторный read-only запуск CLI на двух предоставленных каталогах выполнен
 23.09.2026, дата среза **22.09.2026**. Период между закупками **30 дней** и
@@ -24,6 +25,10 @@ in 56.64s** — и `python -m pip check` — **No broken requirements found**.
 - Среди строк `ok` **23** имеют положительное рекомендуемое количество.
 - Прочитано **171579** накладных IEK и **77296** Systeme Electric; они не
   прибавляются повторно к месячным продажам.
+
+После изменения порядка CSV-экспорта real-data CLI запущен повторно: те же
+статусы и **23** положительные рекомендации, код завершения 0. Экспорт
+поставщику не создавался и не отправлялся.
 
 Streamlit AppTest на этих же каталогах: **12 источников**, **0 исключений** при
 загрузке и расчёте, на экране **378 рассчитанных**, **3459 требуют данных**,
@@ -43,6 +48,16 @@ IEK нет подтверждённого актуального свободн�
 сроки поставки и формат импорта в конкретную 1С не подтверждены. Точность
 прогноза и экономический эффект не измерялись. Полный PASS пяти Must-have на
 реальных данных не заявляется; агент не восстанавливает недостающие факты.
+
+### Сверка обязательных пунктов ТЗ
+
+| Пункт | Реализация и проверка | Граница реальных данных |
+|---|---|---|
+| 1. Продажи, остаток, путь, категория, рост | `engine.py`; тесты `regular_sales_change_forecast_and_order`, `source_stock_and_inbound_change_result`, `category_selection_and_explicit_category_policy`, `supplied_growth_is_not_silently_ignored` | IEK без актуального свободного остатка блокируется |
+| 2. Сезонность и устойчивый рост | `seasonality_changes_future_forecast`, `sustained_growth_detected_separately` | Свойства алгоритма проверены, точность прогноза не измерена |
+| 3. Упущенный спрос при stockout | `confirmed_stockout_increases_estimate`, `full_stockout_uses_observed_reference` | Точные дни в файлах не предоставлены; нужен подтверждённый ввод |
+| 4. Разовая крупная покупка | `isolated_spike_does_not_inflate_order`, `split_customer_purchase_grouped`, `inconsistent_transactions_not_subtracted` | Нет ID клиента в детализации; реальный анализ по накладной |
+| 5. Заказ по поставщикам с объяснением | `review.py`, вкладки Streamlit; `export_groups_suppliers_even_when_calculation_order_is_mixed`, тесты approval/CSV | Формат импорта в конкретную 1С не проверен |
 
 **DEV A — данные, расчёт, финальная интеграция (этот компьютер).** Сверить
 Must-have с кодом и тестами; повторять read-only прогон Excel после изменений;
