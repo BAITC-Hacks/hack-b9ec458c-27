@@ -135,8 +135,12 @@ def run_agent(dataset: Dataset, policy: Policy, item_key: str, request: str, *,
     for _ in range(6):
         try:
             reply = ModelReply.model_validate(model.complete(messages, tools).model_dump())
-        except Exception:
+        except Exception as exc:
             # Never log exception bodies, prompts, API headers or credentials.
+            status_code = getattr(exc, "status_code", None)
+            if type(status_code) is int and 400 <= status_code <= 599:
+                logger.warning("agent_failure stage=model http_status=%d", status_code)
+                return result("model_error", f"AI API вернул HTTP {status_code}. Локальный расчёт сохранён.")
             logger.warning("agent_failure stage=model")
             return result("model_error", "AI не смог завершить запрос. Локальный расчёт сохранён.")
         if not reply.calls:

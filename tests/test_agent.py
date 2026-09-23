@@ -181,6 +181,17 @@ def test_api_failure_is_safe_and_discards_pending_draft(context, caplog):
     assert "C:/private/path" not in result.model_dump_json() + caplog.text
 
 
+def test_api_http_status_is_diagnostic_without_error_body(context, caplog):
+    class StatusError(RuntimeError):
+        status_code = 404
+
+    result = run_agent(*context, "Объясни", model=ScriptedModel(StatusError("SECRET-KEY private path")))
+    assert result.status == "model_error"
+    assert result.message == "AI API вернул HTTP 404. Локальный расчёт сохранён."
+    assert "SECRET-KEY" not in result.model_dump_json() + caplog.text
+    assert "private path" not in result.model_dump_json() + caplog.text
+
+
 def test_calculation_failure_not_success(context, monkeypatch):
     def broken(*args):
         raise OSError("private path and credentials")
