@@ -18,7 +18,11 @@ from replenishment.review import export_csv, fingerprint
 log = logging.getLogger("replenishment.ui")
 st.set_page_config(page_title="Пополнение склада", layout="wide")
 st.title("Заказ без разовых всплесков")
-st.caption("Регулярный спрос → доступный запас → обоснованное количество для закупки")
+st.markdown(
+    "**Для менеджера закупа:** проверьте, что пополнить, почему предложено это количество, "
+    "и утвердите проект заказа. **Сервис не отправляет заказ поставщику.**"
+)
+st.caption("Продажи + доступный запас + товары в пути → расчёт → проверка по поставщику → утверждение")
 
 
 def reset_calculation():
@@ -143,30 +147,73 @@ if calculation is None:
     st.stop()
 ok = [r for r in calculation.rows if r.status == "ok"]
 blocked = [r for r in calculation.rows if r.status != "ok"]
+needs_data = [r for r in blocked if r.status == "needs_data"]
+invalid_data = [r for r in blocked if r.status == "invalid_data"]
+to_order = [r for r in ok if r.quantity > 0]
 a, b, c = st.columns(3)
 a.metric("Рассчитано позиций", len(ok))
-b.metric("Нужна проверка данных", len(blocked))
-c.metric("Предложено к закупке", sum(r.quantity > 0 for r in ok))
+b.metric("Заблокировано: нужны данные", len(needs_data))
+c.metric("Позиций к закупке", len(to_order))
+urgent = [r for r in to_order if r.urgency.lower().startswith("срочно") or r.urgency.lower().startswith("дефицит")]
+if urgent:
+    st.warning("Срочно проверить: " + ", ".join(f"{r.supplier} · {r.sku}" for r in urgent))
+elif to_order:
+    st.caption("Срочных позиций по расчёту нет. Срочность определяется датой ожидаемого дефицита.")
 if blocked:
-    with st.expander("Почему часть позиций не рассчитана", expanded=not ok):
-        st.dataframe(pd.DataFrame([{"Поставщик": r.supplier, "Код": r.sku, "Статус": r.status,
-                                    "Причина": r.explanation, "Подробности": "; ".join(r.warnings)} for r in blocked]), hide_index=True)
+    with st.expander(f"Заблокированные позиции: {len(blocked)}", expanded=not to_order):
+        st.caption(
+            f"{len(needs_data)} строк ожидают недостающие данные; {len(invalid_data)} содержат ошибки. "
+            "Заблокированные строки не участвуют в числовом заказе."
+        )
+        st.dataframe(pd.DataFrame([{"Поставщик": r.supplier, "Код 1С": r.sku, "Артикул": r.article,
+                                    "Товар": r.name, "Статус": r.status, "Почему заблокировано": r.explanation,
+                                    "Предупреждения": "; ".join(r.warnings)} for r in blocked]), hide_index=True)
+        if blocked:
+            blocked_keys = [r.key for r in blocked]
+            detail_key = st.selectbox(
+                "Подробнее о заблокированной позиции", blocked_keys,
+                format_func=lambda key: next(
+                    f"{r.supplier} · {r.sku} — {r.name}" for r in blocked if r.key == key
+                ),
+            )
+            detail = next(r for r in blocked if r.key == detail_key)
+            st.markdown(f"**{detail.status}: {detail.supplier} · {detail.sku}**")
+            st.write(detail.explanation or "Источник сообщил об ошибке без дополнительного описания.")
+            if detail.warnings:
+                for warning in detail.warnings:
+                    st.write("• " + warning)
+            if detail.evidence:
+                st.caption("Источники позиции")
+                st.dataframe(pd.DataFrame([s.model_dump() for s in detail.evidence]), hide_index=True)
 if not ok:
-    st.warning("Нет рассчитанных позиций для утверждения.")
+    st.warning("Нет позиций, рассчитанных для заказа. Сначала устраните показанные причины блокировки.")
     st.stop()
 
 st.subheader("Проект заказа по поставщикам")
-st.caption("Измените количество при необходимости. Ноль исключает позицию из заказа.")
-frame = pd.DataFrame([{"key": r.key, "Поставщик": r.supplier, "Артикул": r.article, "Товар": r.name,
-                       "Единица": r.unit, "Рекомендовано": r.quantity, "К заказу": r.quantity,
-                       "Срочность": r.urgency} for r in ok])
+st.caption("Откройте поставщика, проверьте состав и количество. Ноль исключает позицию; любое изменение требует причины.")
 version = hashlib.sha256(calculation.model_dump_json().encode()).hexdigest()[:16]
-edited = st.data_editor(frame, hide_index=True, disabled=[c for c in frame.columns if c != "К заказу"],
-                        key="draft_" + version, column_config={"key": None,
-                        "К заказу": st.column_config.NumberColumn(min_value=0.0)})
+order_suppliers = sorted({r.supplier for r in ok})
+supplier_tabs = st.tabs(order_suppliers)
+edited_by_supplier = {}
+for supplier, supplier_tab in zip(order_suppliers, supplier_tabs):
+    supplier_rows = [r for r in ok if r.supplier == supplier]
+    frame = pd.DataFrame([{"key": r.key, "Артикул": r.article, "Товар": r.name,
+                           "Единица": r.unit, "Рекомендовано": r.quantity, "К заказу": r.quantity,
+                           "Срочность": r.urgency} for r in supplier_rows])
+    with supplier_tab:
+        st.caption(f"Позиций к заказу: {sum(r.quantity > 0 for r in supplier_rows)} · Всего рассчитано: {len(supplier_rows)}")
+        edited_by_supplier[supplier] = st.data_editor(
+            frame, hide_index=True, disabled=[c for c in frame.columns if c != "К заказу"],
+            key="draft_" + version + "_" + hashlib.sha256(supplier.encode()).hexdigest()[:8],
+            column_config={"key": None, "К заказу": st.column_config.NumberColumn(min_value=0.0)},
+        )
 reason = st.text_input("Причина корректировки (если меняли количество)", key="reason_" + version)
-key = st.selectbox("Показать расчёт позиции", [r.key for r in ok])
+key = st.selectbox(
+    "Показать расчёт позиции", [r.key for r in ok],
+    format_func=lambda key: next(f"{r.supplier} · {r.sku} — {r.name}" for r in ok if r.key == key),
+)
 row = next(r for r in ok if r.key == key)
+st.markdown(f"**{row.supplier} · {row.sku} — {row.name}**")
 st.write(row.explanation)
 with st.expander("Слагаемые, история и источники"):
     st.json(row.components)
@@ -179,7 +226,9 @@ with st.expander("Слагаемые, история и источники"):
     st.dataframe(pd.DataFrame([s.model_dump() for s in row.evidence]), hide_index=True)
 
 try:
-    quantities = {str(r["key"]): float(r["К заказу"]) for r in edited.to_dict("records")}
+    quantities = {r.key: float(r.quantity or 0) for r in ok}
+    for edited in edited_by_supplier.values():
+        quantities.update({str(r["key"]): float(r["К заказу"]) for r in edited.to_dict("records")})
     current = fingerprint(calculation, quantities, reason)
     changed = any(quantities[r.key] != r.quantity for r in ok)
     valid_draft = any(q > 0 for q in quantities.values()) and (not changed or bool(reason.strip()))
