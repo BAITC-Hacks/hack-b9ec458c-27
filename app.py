@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 from datetime import date
 from pathlib import Path
@@ -10,6 +11,8 @@ import streamlit as st
 from pydantic import ValidationError
 
 from replenishment.demo import demo_dataset
+from replenishment.agent import AgentResult, run_agent
+from replenishment.agent_client import model_from_env
 from replenishment.engine import calculate_orders
 from replenishment.importer import load_dataset
 from replenishment.models import Policy, StockInput
@@ -25,9 +28,110 @@ st.markdown(
 st.caption("Продажи + доступный запас + товары в пути → расчёт → проверка по поставщику → утверждение")
 
 
+def reset_agent():
+    for name in ("agent_result", "agent_approval", "agent_identity"):
+        st.session_state.pop(name, None)
+
+
 def reset_calculation():
     st.session_state.pop("calculation", None)
     st.session_state.pop("approval", None)
+    reset_agent()
+
+
+def show_agent(dataset, calculation, dataset_version):
+    st.subheader("AI-помощник по одной позиции")
+    st.caption("Задайте вопрос о расчёте. Проект одной позиции требует отдельного утверждения. "
+               "Данные партнёра во внешний AI не передаются; не вводите персональные данные и секреты в вопрос.")
+    if dataset.synthetic:
+        st.caption("SYNTHETIC/TRAINING — AI работает с учебным примером.")
+    rows = {row.key: row for row in calculation.rows}
+    if not rows:
+        reset_agent()
+        return
+    item_key = st.selectbox("Позиция для AI", list(rows), key="agent_item",
+                            format_func=lambda key: f"{rows[key].supplier} · {rows[key].sku} — {rows[key].name}")
+    question = st.text_input("Вопрос AI", key="agent_question", max_chars=4000)
+    request_order = st.checkbox("Подготовить проект заказа", key="agent_request_order")
+    identity = hashlib.sha256(json.dumps([
+        dataset_version, calculation.model_dump_json(), item_key, question, request_order,
+    ], ensure_ascii=False).encode()).hexdigest()
+    if st.session_state.get("agent_identity") != identity:
+        reset_agent()
+        st.session_state.agent_identity = identity
+    if st.button("Запросить AI-пояснение", key="agent_submit", disabled=not question.strip()):
+        reset_agent()
+        st.session_state.agent_identity = identity
+        model = None
+        with st.spinner("AI проверяет выбранную позицию…"):
+            try:
+                model = model_from_env() if dataset.synthetic else None
+                result = run_agent(dataset, calculation.policy, item_key, question,
+                                   request_order=request_order, model=model, allow_partner_data=False)
+            except Exception:
+                result = AgentResult(status="model_unavailable", synthetic=dataset.synthetic,
+                                     message="AI недоступен. Проверьте настройки подключения. Локальный расчёт доступен.")
+            finally:
+                if model is not None:
+                    try:
+                        model.close()
+                    except Exception:
+                        log.warning("agent_client_close_failed")
+        st.session_state.agent_result = result
+
+    result = st.session_state.get("agent_result")
+    if result is None:
+        return
+    statuses = {
+        "ok": "Пояснение подготовлено", "pending_approval": "Проект ожидает вашего утверждения",
+        "needs_data": "Недостаточно данных", "invalid_data": "Ошибки во входных данных",
+        "not_found": "Позиция не найдена", "model_error": "AI не завершил анализ",
+        "tool_error": "Ошибка инструмента агента", "model_unavailable": "AI не подключён",
+        "data_not_authorized": "Передача данных партнёра в AI запрещена",
+    }
+    successful = result.status in ("ok", "pending_approval")
+    (st.info if successful else st.warning)(f"{statuses[result.status]} ({result.status}). {result.message}")
+    row = result.recommendation
+    if row is not None:
+        st.write(f"Статус локального расчёта: {row.status}")
+        if row.status == "ok" and row.quantity is not None:
+            st.metric("Проверенное количество по расчёту", f"{row.quantity:g} {row.unit or ''}")
+        else:
+            st.write(row.explanation)
+    if not successful:
+        st.session_state.pop("agent_approval", None)
+        return
+    if result.narrative:
+        st.caption("AI-пояснение — текст модели; количество и разрешение на заказ определяются проверенным расчётом и вашим утверждением.")
+        st.text(result.narrative)
+    pending = result.pending_order
+    if not request_order or result.status != "pending_approval" or pending is None:
+        st.session_state.pop("agent_approval", None)
+        return
+    st.markdown("**Отдельный AI-проект: одна выбранная позиция**")
+    try:
+        if (len(pending.calculation.rows) != 1 or pending.calculation.rows[0].key != item_key
+                or set(pending.quantities) != {item_key} or pending.quantities[item_key] <= 0):
+            raise ValueError("Unexpected scope")
+        token = fingerprint(pending.calculation, pending.quantities)
+        if st.session_state.get("agent_approval") != token:
+            st.session_state.pop("agent_approval", None)
+        st.write(f"{rows[item_key].supplier} · {rows[item_key].sku}: "
+                 f"{pending.quantities[item_key]:g} {pending.calculation.rows[0].unit or ''}")
+        approve, reject = st.columns(2)
+        if approve.button("Approve — утвердить AI-проект", key="agent_approve"):
+            st.session_state.agent_approval = token
+        if reject.button("Reject — снять утверждение AI-проекта", key="agent_reject"):
+            st.session_state.pop("agent_approval", None)
+        if st.session_state.get("agent_approval") == token:
+            st.success("AI-проект одной позиции утверждён. Заказ поставщику не отправлялся.")
+            st.download_button("Скачать утверждённый AI-проект CSV",
+                               export_csv(pending.calculation, pending.quantities, st.session_state.agent_approval),
+                               file_name="synthetic_agent_order.csv" if result.synthetic else "agent_order.csv",
+                               mime="text/csv", key="agent_download")
+    except (ValueError, TypeError):
+        st.session_state.pop("agent_approval", None)
+        st.error("AI-проект некорректен. Выполните запрос заново; утверждение и экспорт недоступны.")
 
 
 @st.cache_data(show_spinner=False, max_entries=2)
@@ -76,6 +180,10 @@ else:
         st.info("Загрузите выданные файлы для расчёта.")
         st.stop()
 
+dataset_version = hashlib.sha256(dataset.model_dump_json().encode()).hexdigest()
+if st.session_state.get("dataset_version") != dataset_version:
+    reset_calculation()
+    st.session_state.dataset_version = dataset_version
 for issue in dataset.issues:
     st.info(issue)
 if not dataset.items:
@@ -134,6 +242,7 @@ previous = st.session_state.get("calculation")
 if previous and (policy is None or previous.policy != policy):
     reset_calculation()
 if st.button("Рассчитать рекомендации", type="primary", disabled=policy is None):
+    reset_agent()
     try:
         st.session_state.calculation = calculate_orders(dataset, policy)
         st.session_state.approval = None
@@ -185,6 +294,7 @@ if blocked:
             if detail.evidence:
                 st.caption("Источники позиции")
                 st.dataframe(pd.DataFrame([s.model_dump() for s in detail.evidence]), hide_index=True)
+show_agent(dataset, calculation, dataset_version)
 if not ok:
     st.warning("Нет позиций, рассчитанных для заказа. Сначала устраните показанные причины блокировки.")
     st.stop()
