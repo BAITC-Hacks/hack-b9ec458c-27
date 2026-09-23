@@ -157,6 +157,8 @@ if st.session_state.get("mode") != mode:
     st.session_state["growth"] = {}
     reset_calculation()
 
+overview = st.empty()
+overview.info("Результатов пока нет. Выберите данные и нажмите «Рассчитать рекомендации».")
 if mode == "Учебный пример":
     st.warning("SYNTHETIC/TRAINING — вымышленные данные. Этот режим проверяет поведение, а не фактическую потребность компании.")
     dataset = demo_dataset()
@@ -268,10 +270,15 @@ blocked = [r for r in calculation.rows if r.status != "ok"]
 needs_data = [r for r in blocked if r.status == "needs_data"]
 invalid_data = [r for r in blocked if r.status == "invalid_data"]
 to_order = [r for r in ok if r.quantity > 0]
-a, b, c = st.columns(3)
-a.metric("Рассчитано позиций", len(ok))
-b.metric("Заблокировано: нужны данные", len(needs_data))
-c.metric("Позиций к закупке", len(to_order))
+with overview.container():
+    st.caption("SYNTHETIC/TRAINING — результаты учебного примера" if calculation.synthetic
+               else "Результаты по загруженным файлам партнёра")
+    a, b, c = st.columns(3)
+    a.metric("Рассчитано позиций", len(ok))
+    b.metric("Заблокировано всего", len(blocked))
+    c.metric("Позиций к закупке", len(to_order))
+    st.caption(f"Среди заблокированных: нужны данные — {len(needs_data)}, ошибки данных — {len(invalid_data)}. "
+               "Количество к закупке показано до ручных корректировок.")
 urgent = [r for r in to_order if r.urgency.lower().startswith("срочно") or r.urgency.lower().startswith("дефицит")]
 if urgent:
     st.warning("Срочно проверить: " + ", ".join(f"{r.supplier} · {r.sku}" for r in urgent))
