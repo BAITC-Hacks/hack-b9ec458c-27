@@ -19,6 +19,11 @@ python -m venv .venv
 Откройте адрес, указанный Streamlit (обычно http://localhost:8501).
 Переменные окружения и Node.js для этого MVP не нужны. `.env.example` не содержит ключей.
 
+В ветке `agent-integration` доступен опциональный агентный backend поверх расчёта.
+Streamlit пока не подключён к нему. Контракт, настройка API и ограничения:
+[docs/AGENT_CONTRACT.md](docs/AGENT_CONTRACT.md). Для адаптера модели устанавливается
+`requirements-agent.txt`; обычный расчёт работает без ключа. Живой API ещё не проверен.
+
 ## Проверка за минуту
 
 1. Оставьте режим **«Учебный пример»**, явно помеченный SYNTHETIC/TRAINING.
