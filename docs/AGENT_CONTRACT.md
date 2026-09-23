@@ -1,7 +1,7 @@
 # Агентный backend: контракт для DEV B
 
-Backend включён в `codex/interface-demo` (PR №1), `app.py` вызывает агента по кнопке.
-В `main` автоматически не объединяется. Используется ограниченный цикл function
+Backend включён в `main`, `app.py` вызывает агента по кнопке.
+Используется ограниченный цикл function
 calling; OpenAI Agents SDK не требуется. Асинхронного цикла и фоновых задач нет.
 Расчётный движок и существующий механизм подтверждения сохранены.
 
@@ -30,7 +30,7 @@ from replenishment.agent import run_agent
 from replenishment.agent_client import model_from_env
 
 # dataset, policy, item_key принадлежат UI.
-model = model_from_env()  # None, если модель/ключ не настроены
+model = model_from_env(request_order=request_order_checkbox)  # None, если нет ключа
 try:
     result = run_agent(
         dataset, policy, item_key, question,
@@ -84,8 +84,13 @@ finally:
 `python -m pip install -r requirements-agent.txt` устанавливает опциональный адаптер.
 `requirements.txt` достаточно для ядра, UI и тестов с fake-моделью.
 
-Переменные процесса: `AGENT_API_KEY`, `AGENT_MODEL`, `AGENT_BASE_URL`. Модель выбирается
-явно; ключ не ищется в других проектах. Default endpoint: `https://api.openai.com/v1`.
+Переменные процесса: `AGENT_API_KEY`, опциональные `AGENT_MODEL_LIGHT`,
+`AGENT_MODEL_ORDER`, `AGENT_MODEL` и `AGENT_BASE_URL`. Без переопределения простое
+пояснение идёт в `gpt-6-luna`, подготовка проекта — в `gpt-6-sol`. Старый
+`AGENT_MODEL` переопределяет обе модели; отдельные настройки имеют приоритет.
+Обе модели при function calling через Chat Completions используют
+`reasoning_effort="none"`. Ключ не ищется в других проектах. Default endpoint:
+`https://api.openai.com/v1`.
 Допустим другой HTTPS Chat Completions endpoint; совместимость конкретной NVIDIA-модели
 и параметров пока не проверена. `.env` автоматически не читается: настройте окружение
 запуска IDE или терминала. Секреты не коммитить.

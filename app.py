@@ -65,7 +65,7 @@ def show_agent(dataset, calculation, dataset_version):
         model = None
         with st.spinner("AI проверяет выбранную позицию…"):
             try:
-                model = model_from_env() if dataset.synthetic else None
+                model = model_from_env(request_order=request_order) if dataset.synthetic else None
                 result = run_agent(dataset, calculation.policy, item_key, question,
                                    request_order=request_order, model=model, allow_partner_data=False)
             except Exception:

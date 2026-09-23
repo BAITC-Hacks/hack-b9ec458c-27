@@ -23,7 +23,10 @@ python -m venv .venv
 расчёта введите вопрос и нажмите «Запросить AI-пояснение». Checkbox подготовки заказа
 создаёт отдельный проект, который требует собственного Approve; Reject снимает его.
 Для адаптера установите `python -m pip install -r requirements-agent.txt` и задайте
-`AGENT_API_KEY`, `AGENT_MODEL`, `AGENT_BASE_URL` в окружении запуска. `.env` автоматически
+`AGENT_API_KEY` в окружении запуска. Простое пояснение использует `gpt-6-luna`, запрос
+с подготовкой проекта — `gpt-6-sol`; модели можно переопределить через
+`AGENT_MODEL_LIGHT` и `AGENT_MODEL_ORDER` (старый `AGENT_MODEL` задаёт одну для обеих задач).
+`AGENT_BASE_URL` по умолчанию — `https://api.openai.com/v1`. `.env` автоматически
 не читается. Без ключа сохраняется локальный расчёт, AI сообщает `model_unavailable`.
 AI в текущем UI доступен только для SYNTHETIC/TRAINING; данные партнёра во внешний API
 не отправляются. Контракт: [docs/AGENT_CONTRACT.md](docs/AGENT_CONTRACT.md).

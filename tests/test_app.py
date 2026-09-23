@@ -115,7 +115,7 @@ class FakeAgentModel:
 @pytest.fixture
 def agent_factory(monkeypatch):
     models = []
-    def create():
+    def create(**kwargs):
         model = FakeAgentModel()
         models.append(model)
         return model
@@ -162,6 +162,7 @@ def test_agent_submit_only_and_structured_result(agent_factory, request_order, m
     next(s for s in app.selectbox if s.label == "Показать расчёт позиции").select_index(1).run()
     assert not app.exception
     assert agent_factory.call_count == 1
+    assert agent_factory.call_args.kwargs == {"request_order": request_order}
     assert agent_factory.models[0].calls == 2
     assert agent_factory.models[0].closed
     assert "agent_approval" not in app.session_state
@@ -246,6 +247,7 @@ def test_agent_error_status_never_offers_approval(agent_factory, monkeypatch, st
 
 
 def test_agent_no_configuration_keeps_local_order_working(monkeypatch):
+    monkeypatch.delenv("AGENT_API_KEY", raising=False)
     monkeypatch.delenv("AGENT_MODEL", raising=False)
     app = agent_app()
     app.button(key="agent_submit").click().run()
@@ -308,7 +310,7 @@ def test_agent_dispatch_failure_closes_client_without_leaking(monkeypatch, failu
         model.complete = Mock(side_effect=RuntimeError("PRIVATE_ERROR_DETAIL"))
     else:
         model.complete = Mock(return_value=ModelReply(calls=[ToolCall(id="bad", name="unsupported_tool")]))
-    monkeypatch.setattr("replenishment.agent_client.model_from_env", lambda: model)
+    monkeypatch.setattr("replenishment.agent_client.model_from_env", lambda **kwargs: model)
     app = agent_app()
     app.button(key="agent_submit").click().run()
     assert not app.exception
