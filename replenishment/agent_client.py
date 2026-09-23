@@ -5,7 +5,7 @@ from urllib.parse import urlsplit
 from .agent import ModelReply, ToolCall
 
 LIGHT_MODEL = "gpt-6-luna"
-ORDER_MODEL = "gpt-6-sol"
+COMPLEX_MODEL = "gpt-6-sol"
 
 
 class OpenAIChatModel:
@@ -18,7 +18,7 @@ class OpenAIChatModel:
             model=self.model, messages=messages, tools=tools,
             parallel_tool_calls=False, max_completion_tokens=1200,
         )
-        if self.model in (LIGHT_MODEL, ORDER_MODEL):
+        if self.model in (LIGHT_MODEL, COMPLEX_MODEL):
             # GPT-6 function calling through Chat Completions requires this mode.
             options["reasoning_effort"] = "none"
         response = self.client.chat.completions.create(**options)
@@ -35,12 +35,12 @@ class OpenAIChatModel:
         self.client.close()
 
 
-def model_from_env(*, request_order: bool = False) -> OpenAIChatModel | None:
+def model_from_env(*, complex_task: bool = False) -> OpenAIChatModel | None:
     """Choose a model for the UI task; require a key and leave .env files untouched."""
     key = os.environ.get("AGENT_API_KEY", "").strip()
-    model = (os.environ.get("AGENT_MODEL_ORDER" if request_order else "AGENT_MODEL_LIGHT", "").strip()
+    model = (os.environ.get("AGENT_MODEL_COMPLEX" if complex_task else "AGENT_MODEL_LIGHT", "").strip()
              or os.environ.get("AGENT_MODEL", "").strip()
-             or (ORDER_MODEL if request_order else LIGHT_MODEL))
+             or (COMPLEX_MODEL if complex_task else LIGHT_MODEL))
     endpoint = os.environ.get("AGENT_BASE_URL", "https://api.openai.com/v1").strip()
     if not key:
         return None

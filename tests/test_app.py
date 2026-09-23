@@ -162,10 +162,21 @@ def test_agent_submit_only_and_structured_result(agent_factory, request_order, m
     next(s for s in app.selectbox if s.label == "Показать расчёт позиции").select_index(1).run()
     assert not app.exception
     assert agent_factory.call_count == 1
-    assert agent_factory.call_args.kwargs == {"request_order": request_order}
+    assert agent_factory.call_args.kwargs == {"complex_task": request_order}
     assert agent_factory.models[0].calls == 2
     assert agent_factory.models[0].closed
     assert "agent_approval" not in app.session_state
+
+
+def test_enhanced_explanation_selects_complex_model_without_order(agent_factory):
+    app = agent_app(request_order=False)
+    app.checkbox(key="agent_deep_analysis").check().run()
+    app.button(key="agent_submit").click().run()
+    assert not app.exception
+    assert agent_factory.call_args.kwargs == {"complex_task": True}
+    assert app.session_state["agent_result"].status == "ok"
+    assert "agent_approval" not in app.session_state
+    assert not app.get("download_button")
 
 
 def test_agent_approve_reject_separate_scope(agent_factory, monkeypatch):
@@ -199,7 +210,7 @@ def test_agent_approve_reject_separate_scope(agent_factory, monkeypatch):
     assert "agent_approval" not in app.session_state
 
 
-@pytest.mark.parametrize("change", ["question", "item", "checkbox", "policy", "data", "mode", "recalculate"])
+@pytest.mark.parametrize("change", ["question", "item", "checkbox", "deep_analysis", "policy", "data", "mode", "recalculate"])
 def test_agent_inputs_invalidate_response_and_approval(agent_factory, monkeypatch, change):
     app = agent_app()
     app.button(key="agent_submit").click().run()
@@ -211,6 +222,8 @@ def test_agent_inputs_invalidate_response_and_approval(agent_factory, monkeypatc
         app.selectbox(key="agent_item").select_index(1).run()
     elif change == "checkbox":
         app.checkbox(key="agent_request_order").uncheck().run()
+    elif change == "deep_analysis":
+        app.checkbox(key="agent_deep_analysis").check().run()
     elif change == "policy":
         next(n for n in app.number_input if n.label == "Период между закупками, дней").set_value(60).run()
     elif change == "data":

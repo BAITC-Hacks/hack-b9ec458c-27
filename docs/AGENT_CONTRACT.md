@@ -30,7 +30,7 @@ from replenishment.agent import run_agent
 from replenishment.agent_client import model_from_env
 
 # dataset, policy, item_key принадлежат UI.
-model = model_from_env(request_order=request_order_checkbox)  # None, если нет ключа
+model = model_from_env(complex_task=request_order_checkbox or enhanced_explanation_checkbox)
 try:
     result = run_agent(
         dataset, policy, item_key, question,
@@ -85,8 +85,8 @@ finally:
 `requirements.txt` достаточно для ядра, UI и тестов с fake-моделью.
 
 Переменные процесса: `AGENT_API_KEY`, опциональные `AGENT_MODEL_LIGHT`,
-`AGENT_MODEL_ORDER`, `AGENT_MODEL` и `AGENT_BASE_URL`. Без переопределения простое
-пояснение идёт в `gpt-6-luna`, подготовка проекта — в `gpt-6-sol`. Старый
+`AGENT_MODEL_COMPLEX`, `AGENT_MODEL` и `AGENT_BASE_URL`. Без переопределения простое
+пояснение идёт в `gpt-6-luna`, усиленное пояснение и подготовка проекта — в `gpt-6-sol`. Старый
 `AGENT_MODEL` переопределяет обе модели; отдельные настройки имеют приоритет.
 Обе модели при function calling через Chat Completions используют
 `reasoning_effort="none"`. Ключ не ищется в других проектах. Default endpoint:

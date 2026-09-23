@@ -3,12 +3,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from replenishment.agent_client import LIGHT_MODEL, ORDER_MODEL, OpenAIChatModel, model_from_env
+from replenishment.agent_client import COMPLEX_MODEL, LIGHT_MODEL, OpenAIChatModel, model_from_env
 
 
 @pytest.fixture
 def clean_env(monkeypatch):
-    for name in ("AGENT_API_KEY", "AGENT_MODEL", "AGENT_MODEL_LIGHT", "AGENT_MODEL_ORDER",
+    for name in ("AGENT_API_KEY", "AGENT_MODEL", "AGENT_MODEL_LIGHT", "AGENT_MODEL_COMPLEX",
                  "AGENT_BASE_URL"):
         monkeypatch.delenv(name, raising=False)
 
@@ -22,7 +22,7 @@ def test_key_without_model_selects_task_defaults(clean_env, monkeypatch):
         SimpleNamespace(close=lambda: None)))
     monkeypatch.setenv("AGENT_API_KEY", "test-placeholder")
     assert model_from_env().model == LIGHT_MODEL
-    assert model_from_env(request_order=True).model == ORDER_MODEL
+    assert model_from_env(complex_task=True).model == COMPLEX_MODEL
 
 
 def test_task_model_overrides_and_legacy_override(clean_env, monkeypatch):
@@ -31,11 +31,11 @@ def test_task_model_overrides_and_legacy_override(clean_env, monkeypatch):
     monkeypatch.setenv("AGENT_API_KEY", "test-placeholder")
     monkeypatch.setenv("AGENT_MODEL", "legacy-model")
     assert model_from_env().model == "legacy-model"
-    assert model_from_env(request_order=True).model == "legacy-model"
+    assert model_from_env(complex_task=True).model == "legacy-model"
     monkeypatch.setenv("AGENT_MODEL_LIGHT", "light-override")
-    monkeypatch.setenv("AGENT_MODEL_ORDER", "order-override")
+    monkeypatch.setenv("AGENT_MODEL_COMPLEX", "complex-override")
     assert model_from_env().model == "light-override"
-    assert model_from_env(request_order=True).model == "order-override"
+    assert model_from_env(complex_task=True).model == "complex-override"
 
 
 def test_factory_uses_explicit_config_and_bounds_requests(clean_env, monkeypatch):
@@ -80,7 +80,7 @@ def test_adapter_serializes_tool_protocol_and_converts_reply():
     assert "reasoning_effort" not in requests[0]
 
 
-@pytest.mark.parametrize("name", [LIGHT_MODEL, ORDER_MODEL])
+@pytest.mark.parametrize("name", [LIGHT_MODEL, COMPLEX_MODEL])
 def test_gpt6_chat_tool_calls_use_supported_reasoning_mode(name):
     requests = []
     def create(**kwargs):

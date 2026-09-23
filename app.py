@@ -53,8 +53,9 @@ def show_agent(dataset, calculation, dataset_version):
                             format_func=lambda key: f"{rows[key].supplier} · {rows[key].sku} — {rows[key].name}")
     question = st.text_input("Вопрос AI", key="agent_question", max_chars=4000)
     request_order = st.checkbox("Подготовить проект заказа", key="agent_request_order")
+    deep_analysis = st.checkbox("Усиленное AI-пояснение", key="agent_deep_analysis")
     identity = hashlib.sha256(json.dumps([
-        dataset_version, calculation.model_dump_json(), item_key, question, request_order,
+        dataset_version, calculation.model_dump_json(), item_key, question, request_order, deep_analysis,
     ], ensure_ascii=False).encode()).hexdigest()
     if st.session_state.get("agent_identity") != identity:
         reset_agent()
@@ -65,7 +66,7 @@ def show_agent(dataset, calculation, dataset_version):
         model = None
         with st.spinner("AI проверяет выбранную позицию…"):
             try:
-                model = model_from_env(request_order=request_order) if dataset.synthetic else None
+                model = model_from_env(complex_task=request_order or deep_analysis) if dataset.synthetic else None
                 result = run_agent(dataset, calculation.policy, item_key, question,
                                    request_order=request_order, model=model, allow_partner_data=False)
             except Exception:
